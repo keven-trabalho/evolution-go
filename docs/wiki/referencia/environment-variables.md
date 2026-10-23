@@ -31,12 +31,16 @@ Para documentação detalhada, consulte: [Configuração](../fundamentos/configu
 |----------|-----------|
 | `POSTGRES_AUTH_DB` | Connection string banco de autenticação |
 | `POSTGRES_USERS_DB` | Connection string banco de usuários |
+| `POSTGRES_AUTH_MAX_CONNS` | Máximo de conexões abertas no banco de auth (padrão `25`). Esse pool é compartilhado pelo whatsmeow de todas as instâncias. |
+| `POSTGRES_USERS_MAX_CONNS` | Máximo de conexões abertas no banco de usuários (padrão `25`) |
 
 **Formato:**
 ```env
 POSTGRES_AUTH_DB=postgresql://user:pass@host:5432/evogo_auth?sslmode=disable
 POSTGRES_USERS_DB=postgresql://user:pass@host:5432/evogo_users?sslmode=disable
 ```
+
+Cada processo usa no máximo `POSTGRES_AUTH_MAX_CONNS + POSTGRES_USERS_MAX_CONNS` conexões, independente do número de instâncias ou reconexões. Com várias réplicas, multiplique pelo número de réplicas e mantenha o total abaixo do `max_connections` do Postgres. Se o log mostrar `[DB] Pool auth: N esperas por conexão`, o limite está baixo para a carga.
 
 ---
 

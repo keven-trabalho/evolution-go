@@ -24,6 +24,8 @@ type Config struct {
 	PostgresUser         string
 	PostgresPassword     string
 	PostgresDB           string
+	AuthDBMaxConns       int
+	UsersDBMaxConns      int
 	DatabaseSaveMessages bool
 	GlobalApiKey         string
 	WaDebug              string
@@ -162,50 +164,63 @@ func (c *Config) CreateUsersDB() (*gorm.DB, error) {
 		return nil, err
 	}
 
-	// Configurar pool de conexões no GORM
 	sqlDB, err := db.DB()
 	if err != nil {
 		return nil, fmt.Errorf("erro ao obter sql.DB do GORM: %v", err)
 	}
 
-	// Configurar pool de conexões para evitar conexões ociosas não fechadas
-	sqlDB.SetMaxOpenConns(25)                 // Máximo de 25 conexões abertas simultaneamente
-	sqlDB.SetMaxIdleConns(5)                  // Máximo de 5 conexões ociosas no pool
-	sqlDB.SetConnMaxLifetime(5 * time.Minute) // Reconectar após 5 minutos para evitar timeouts
-	sqlDB.SetConnMaxIdleTime(1 * time.Minute) // Fechar conexões ociosas após 1 minuto
+	ConfigurePool(sqlDB, c.UsersDBMaxConns)
 
 	return db, nil
 }
 
-func (c *Config) CreateAuthDB() (*sql.DB, error) {
-	dbDSN := c.postgresUsersDB
+const (
+	defaultMaxConns = 25
+	maxIdleConns    = 10
+)
 
-	if c.postgresUsersDB == "" {
-		dbDSN = fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable", c.PostgresHost, c.PostgresPort, c.PostgresUser, c.PostgresPassword, c.PostgresDB)
+// ConfigurePool limita o pool de um *sql.DB. Sem isso o database/sql abre
+// conexões sem limite e o Postgres responde "too many clients already".
+func ConfigurePool(db *sql.DB, maxOpen int) {
+	if maxOpen <= 0 {
+		maxOpen = defaultMaxConns
 	}
+	db.SetMaxOpenConns(maxOpen)
+	db.SetMaxIdleConns(min(maxIdleConns, maxOpen))
+	db.SetConnMaxLifetime(5 * time.Minute)
+	db.SetConnMaxIdleTime(1 * time.Minute)
+}
 
-	if err := ensureDBExists(dbDSN); err != nil {
-		logger.LogWarn("[CONFIG] Auto-setup failed (will try connecting anyway): %v", err)
+// MonitorPool avisa no log quando requisições precisaram esperar por uma
+// conexão livre, sinal de que o limite do pool está baixo para a carga.
+func MonitorPool(name string, db *sql.DB, interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		last := db.Stats()
+		for range ticker.C {
+			cur := db.Stats()
+			if waits := cur.WaitCount - last.WaitCount; waits > 0 {
+				logger.LogWarn("[DB] Pool %s: %d esperas por conexão (%s no total) no último intervalo; em uso %d/%d. Considere aumentar o limite de conexões.",
+					name, waits, cur.WaitDuration-last.WaitDuration, cur.InUse, cur.MaxOpenConnections)
+			}
+			last = cur
+		}
+	}()
+}
+
+func parseMaxConns(key string) int {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultMaxConns
 	}
-
-	db, err := sql.Open("postgres", dbDSN)
-	if err != nil {
-		return nil, err
+	n, err := strconv.Atoi(value)
+	if err != nil || n <= 0 {
+		logger.LogWarn("[CONFIG] %s inválido (%q), usando %d", key, value, defaultMaxConns)
+		return defaultMaxConns
 	}
-
-	// Configurar pool de conexões para evitar conexões ociosas não fechadas
-	db.SetMaxOpenConns(25)                 // Máximo de 25 conexões abertas simultaneamente
-	db.SetMaxIdleConns(5)                  // Máximo de 5 conexões ociosas no pool
-	db.SetConnMaxLifetime(5 * time.Minute) // Reconectar após 5 minutos para evitar timeouts
-	db.SetConnMaxIdleTime(1 * time.Minute) // Fechar conexões ociosas após 1 minuto
-
-	// Testar a conexão
-	err = db.Ping()
-	if err != nil {
-		return nil, fmt.Errorf("erro ao testar conexão PostgreSQL AUTH: %v", err)
-	}
-
-	return db, nil
+	return n
 }
 
 func Load() *Config {
@@ -363,6 +378,8 @@ func Load() *Config {
 		PostgresUser:         postgresUser,
 		PostgresPassword:     postgresPassword,
 		PostgresDB:           postgresDB,
+		AuthDBMaxConns:       parseMaxConns(config_env.POSTGRES_AUTH_MAX_CONNS),
+		UsersDBMaxConns:      parseMaxConns(config_env.POSTGRES_USERS_MAX_CONNS),
 		WhatsappVersionMajor: major,
 		WhatsappVersionMinor: minor,
 		WhatsappVersionPatch: patch,

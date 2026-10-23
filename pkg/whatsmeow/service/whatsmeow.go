@@ -97,6 +97,61 @@ type whatsmeowService struct {
 	natsProducer       producer_interfaces.Producer
 	loggerWrapper      *logger_wrapper.LoggerManager
 	passkeyCeremony    *ceremony.Store
+	deviceContainer    *sharedContainer
+}
+
+// sharedContainer guarda um único sqlstore.Container (e, portanto, um único
+// pool de conexões) para o processo inteiro. Todas as instâncias compartilham
+// o mesmo container: a separação entre elas é feita pelo JID na tabela
+// whatsmeow_device. Reconexões apenas buscam o device no container existente,
+// sem abrir novos pools no banco.
+type sharedContainer struct {
+	mu        sync.Mutex
+	container *sqlstore.Container
+}
+
+// getContainer devolve o container compartilhado, criando-o na primeira chamada.
+// Se a criação falhar, nada é guardado e a próxima chamada tenta de novo.
+func (w whatsmeowService) getContainer() (*sqlstore.Container, error) {
+	sc := w.deviceContainer
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+
+	if sc.container != nil {
+		return sc.container, nil
+	}
+
+	var dbLog waLog.Logger
+	if w.config.WaDebug != "" {
+		dbLog = waLog.Stdout("Database", w.config.WaDebug, true)
+	}
+
+	ctx := context.Background()
+	var (
+		container *sqlstore.Container
+		err       error
+	)
+
+	if w.config.PostgresAuthDB != "" {
+		// Reaproveita o pool do banco de auth (já limitado em main.go) em vez de
+		// abrir um *sql.DB novo, que não tem limite de conexões.
+		if w.authDB == nil {
+			return nil, fmt.Errorf("postgres auth database is not initialized")
+		}
+		container = sqlstore.NewWithDB(w.authDB, "postgres", dbLog)
+		if err = container.Upgrade(ctx); err != nil {
+			return nil, fmt.Errorf("failed to upgrade whatsmeow schema: %w", err)
+		}
+	} else {
+		dsn := fmt.Sprintf("file:%s/dbdata/main.db?_pragma=foreign_keys(1)&_busy_timeout=5000&cache=shared&mode=rwc&_journal_mode=WAL", w.exPath)
+		container, err = sqlstore.New(ctx, "sqlite", dsn, dbLog)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	sc.container = container
+	return container, nil
 }
 
 type MyClient struct {
@@ -314,25 +369,8 @@ func (w whatsmeowService) StartClient(cd *ClientData) {
 		}
 	}
 
-	var container *sqlstore.Container
-
-	if w.config.WaDebug != "" {
-		dbLog := waLog.Stdout("Database", w.config.WaDebug, true)
-		if w.config.PostgresAuthDB != "" {
-			container, err = sqlstore.New(context.Background(), "postgres", w.config.PostgresAuthDB, dbLog)
-		} else {
-			dsn := fmt.Sprintf("file:%s/dbdata/main.db?_pragma=foreign_keys(1)&_busy_timeout=5000&cache=shared&mode=rwc&_journal_mode=WAL", w.exPath)
-			container, err = sqlstore.New(context.Background(), "sqlite", dsn, dbLog)
-		}
-	} else {
-		if w.config.PostgresAuthDB != "" {
-			container, err = sqlstore.New(context.Background(), "postgres", w.config.PostgresAuthDB, nil)
-		} else {
-			dsn := fmt.Sprintf("file:%s/dbdata/main.db?_pragma=foreign_keys(1)&_busy_timeout=5000&cache=shared&mode=rwc&_journal_mode=WAL", w.exPath)
-			container, err = sqlstore.New(context.Background(), "sqlite", dsn, nil)
-		}
-	}
-
+	// Container único e compartilhado: reconexões não abrem novos pools no banco.
+	container, err := w.getContainer()
 	if err != nil {
 		w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Failed to create container: %v", cd.Instance.Id, err)
 		return
@@ -2831,6 +2869,7 @@ func NewWhatsmeowService(
 		natsProducer:       natsProducer,
 		loggerWrapper:      loggerWrapper,
 		passkeyCeremony:    ceremony.NewStore(),
+		deviceContainer:    &sharedContainer{},
 	}
 }
 

@@ -297,25 +297,22 @@ func initAuthDB(config *config.Config) (*sql.DB, string, error) {
 	return db, exPath, nil
 }
 
-func initPostgresAuthDB(config *config.Config) (*sql.DB, error) {
-	if config.PostgresAuthDB == "" {
+func initPostgresAuthDB(cfg *config.Config) (*sql.DB, error) {
+	if cfg.PostgresAuthDB == "" {
 		return nil, nil
 	}
 
-	if err := config.EnsureDBExists(config.PostgresAuthDB); err != nil {
+	if err := cfg.EnsureDBExists(cfg.PostgresAuthDB); err != nil {
 		logger.LogWarn("Auto-setup auth DB failed (will try connecting anyway): %v", err)
 	}
 
-	db, err := sql.Open("postgres", config.PostgresAuthDB)
+	db, err := sql.Open("postgres", cfg.PostgresAuthDB)
 	if err != nil {
 		return nil, fmt.Errorf("erro ao conectar ao banco AUTH PostgreSQL: %v", err)
 	}
 
-	// Configurar pool de conexões para evitar conexões ociosas não fechadas
-	db.SetMaxOpenConns(25)                 // Máximo de 25 conexões abertas simultaneamente
-	db.SetMaxIdleConns(5)                  // Máximo de 5 conexões ociosas no pool
-	db.SetConnMaxLifetime(5 * time.Minute) // Reconectar após 5 minutos para evitar timeouts
-	db.SetConnMaxIdleTime(1 * time.Minute) // Fechar conexões ociosas após 1 minuto
+	// Este pool também é o do sqlstore do whatsmeow, compartilhado por todas as instâncias.
+	config.ConfigurePool(db, cfg.AuthDBMaxConns)
 
 	err = db.Ping()
 	if err != nil {
@@ -348,6 +345,9 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	if usersSQLDB, err := db.DB(); err == nil {
+		config.MonitorPool("users", usersSQLDB, time.Minute)
+	}
 
 	// Inicializar PostgreSQL AUTH
 	authDB, err := initPostgresAuthDB(cfg)
@@ -356,6 +356,7 @@ func main() {
 	}
 	if authDB != nil {
 		defer authDB.Close()
+		config.MonitorPool("auth", authDB, time.Minute)
 	}
 
 	// Manter inicialização do SQLite

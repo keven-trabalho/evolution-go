@@ -1,5 +1,16 @@
 # Evolution GO - Changelog
 
+## Unreleased
+
+### 🐛 Bug Fixes
+- **`FATAL: sorry, too many clients already` no Postgres** — cada reconexão de
+  instância criava um `sqlstore.Container` com um `*sql.DB` novo, sem limite e
+  nunca fechado. Agora o processo usa um único container, criado sob demanda e
+  apoiado no pool de auth (`NewWithDB`), e o `Upgrade` do schema roda uma vez.
+- Limites dos pools configuráveis por `POSTGRES_AUTH_MAX_CONNS` e
+  `POSTGRES_USERS_MAX_CONNS` (padrão 25 cada). O log avisa quando há espera por
+  conexão. Removido o `CreateAuthDB`, que não era usado.
+
 ## v0.7.2
 
 **Docker:** `evoapicloud/evolution-go:0.7.2`
