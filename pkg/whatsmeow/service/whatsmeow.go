@@ -441,6 +441,16 @@ func (w whatsmeowService) StartClient(cd *ClientData) {
 		}
 	}
 
+	// DeviceProps.Version is only the companion label shown on the phone.
+	// The websocket handshake uses store.GetWAVersion(), which stays on the
+	// version compiled into whatsmeow until SetWAVersion is called. WhatsApp
+	// closes that socket with 405 (client outdated) before any QR is emitted.
+	if applied, ok := applyWhatsAppHandshakeVersion(version); ok {
+		w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] WhatsApp handshake version set to %s", cd.Instance.Id, applied)
+	} else {
+		w.loggerWrapper.GetLogger(cd.Instance.Id).LogWarn("[%s] WhatsApp handshake version left at library default %s", cd.Instance.Id, store.GetWAVersion().String())
+	}
+
 	// 🔒 FIX: Sempre criar logger, mesmo que WaDebug esteja vazio
 	// Usar "INFO" como nível mínimo para garantir que logs importantes apareçam
 	minLevel := w.config.WaDebug
@@ -2647,6 +2657,21 @@ var (
 	cachedWebVersionMu sync.Mutex
 	webVersionCacheTTL = 1 * time.Hour
 )
+
+// applyWhatsAppHandshakeVersion publishes the resolved WhatsApp Web version
+// to the global client payload used by the websocket handshake.
+// A zero version is ignored so a failed lookup does not wipe the library default.
+func applyWhatsAppHandshakeVersion(version clientVersion) (string, bool) {
+	if version.Major == 0 && version.Minor == 0 && version.Patch == 0 {
+		return "", false
+	}
+	store.SetWAVersion(store.WAVersionContainer{
+		uint32(version.Major),
+		uint32(version.Minor),
+		uint32(version.Patch),
+	})
+	return store.GetWAVersion().String(), true
+}
 
 func fetchWhatsAppWebVersion() (*clientVersion, error) {
 	cachedWebVersionMu.Lock()
